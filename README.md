@@ -1,0 +1,44 @@
+# cache-status
+
+A Claude Code mod that shows how much of the prompt-cache window is left, right in the
+desktop app's status area.
+
+```
+🟢 cache ● 1h ██████ 59m left · hit 89% · misses 0 (est.)
+```
+
+## What it shows
+
+- **Countdown bar**: six blocks for the remaining cache TTL (5m or 1h). Turns 🟡 under 20%.
+- **Time left** until the cache goes cold.
+- **Hit rate**: share of input tokens served from cache this session.
+- **Misses**: turns where the cached prefix shrank unexpectedly (≥5% and ≥2k tokens).
+- **Cold**: `🔴 cache ○ cold · next message re-caches ~Nk tokens` once the TTL has passed.
+
+All values are **estimates** from main-thread response usage; the mod API exposes no
+`prompt_cache` object. Subagent turns are ignored.
+
+## TTL detection
+
+Defaults to `1h`. Uses `5m` when `FORCE_PROMPT_CACHING_5M=1` or
+`CLAUDE_CODE_PROMPT_CACHE_TTL=5m`.
+
+## Surfaces
+
+Only renders in the desktop app. In the terminal it stays hidden, because a `statusLine`
+script there can read the exact `prompt_cache` data.
+
+## Layout
+
+```
+.claude-plugin/plugin.json   plugin manifest
+hooks/hooks.json             registers the module
+hooks/register.ts            the mod (hooks on session.start and turn.step, refresh every 30s)
+hooks/register.test.ts       tests for record/format
+```
+
+## Test
+
+```bash
+bun test
+```

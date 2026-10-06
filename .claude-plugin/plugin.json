@@ -1,0 +1,1 @@
+{ "name": "cache-status", "version": "0.1.0", "description": "Prompt cache warm/cold countdown in the status line (estimated from response usage)" }
