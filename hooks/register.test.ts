@@ -1,23 +1,80 @@
-import { describe, expect, test } from 'bun:test'
-import { emptyStats, format, record } from './register'
+// Integration tests: run against the real engine with `claude plugin test .`
+import type { On } from 'claude-code'
+import { expect, mock, test } from 'claude-code/testing'
+import { HANDOFF_ASK } from './register'
 
-const u = (read: number, write: number) =>
-  ({ input_tokens: 10, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 100 })
+const MIN = 60_000
 
-describe('cache-status', () => {
-  test('nothing before first response', () => {
-    expect(format(emptyStats('1h'), 0)).toBeUndefined()
+// The engine's world beneath the mod: one desktop surface, a prompt box, recorded toasts and status.
+const world = (on: On, env: Record<string, string> = {}) => {
+  const clock = mock.clock(on)
+  mock.env(on, env)
+  const seen = { toasts: [] as string[], status: undefined as string | undefined, box: '' }
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.surfaces', () => ({ value: ['desktop'] }))
+  on('ui.status', ($, e) => { seen.status = e.text; return { value: undefined } })
+  on('ui.toast', ($, e) => { seen.toasts.push(e.text); return { value: undefined } })
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('prompt.read', () => ({ value: { text: seen.box, cursor: seen.box.length } }))
+  on('prompt.fill', ($, e) => {
+    seen.box = e.mode === 'replace' ? e.text : seen.box + e.text
+    return { isFilled: true }
   })
-  test('warm, expiring, cold', () => {
-    let s = record(emptyStats('1h'), u(0, 80000), 0)
-    s = record(s, u(80000, 2000), 1000)
-    expect(format(s, 1000 + 22 * 60_000)).toContain('🟢 cache ● 1h ████░░ 38m left')
-    expect(format(s, 1000 + 54 * 60_000)).toContain('🟡')
-    expect(format(s, 1000 + 61 * 60_000)).toBe('🔴 cache ○ cold · next message re-caches ~82k tokens')
+  on('turn.step', async function* () {
+    return {
+      turnId: 't1', index: 0, answer: 'ok', toolUses: [], stopReason: 'end_turn',
+      usage: { input_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 80_000, output_tokens: 100 },
+    }
   })
-  test('counts a miss', () => {
-    let s = record(emptyStats('5m'), u(0, 50000), 0)
-    s = record(s, u(0, 52000), 1000)
-    expect(s.misses).toBe(1)
-  })
+  return { clock, seen }
+}
+
+const start = async ($: any) => {
+  await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
+  for await (const _ of $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })) { /* drain */ }
+}
+
+test('1h window: status shows countdown, handoff drafted once in last 5m', async ($, on) => {
+  const { clock, seen } = world(on)
+  await start($)
+  expect(seen.status).toContain('cache ● 1h')
+
+  await clock.advance(50 * MIN)
+  expect(seen.toasts).toEqual([])
+  expect(seen.box).toBe('')
+
+  await clock.advance(6 * MIN)
+  expect(seen.toasts.length).toBe(1)
+  expect(seen.box).toBe(HANDOFF_ASK)
+
+  await clock.advance(3 * MIN)
+  expect(seen.toasts.length).toBe(1)
+
+  await clock.advance(2 * MIN)
+  expect(seen.status).toContain('🔴 cache ○ cold')
+})
+
+test('5m window: handoff drafted in last minute', async ($, on) => {
+  const { clock, seen } = world(on, { FORCE_PROMPT_CACHING_5M: '1' })
+  await start($)
+  await clock.advance(3 * MIN)
+  expect(seen.box).toBe('')
+  await clock.advance(MIN + 30_000)
+  expect(seen.box).toBe(HANDOFF_ASK)
+})
+
+test('/handoff appends to a draft and never duplicates', async ($, on) => {
+  const { seen } = world(on)
+  await start($)
+  seen.box = 'my draft'
+  const run = () => $.command.run({
+    command: 'handoff', args: '',
+    origin: { kind: 'user' },
+    presentation: { isFullscreen: false },
+  } as never)
+  const r = await run()
+  expect(r.text).toContain('Handoff prompt drafted')
+  expect(seen.box).toBe(`my draft\n${HANDOFF_ASK}`)
+  await run()
+  expect(seen.box).toBe(`my draft\n${HANDOFF_ASK}`)
 })

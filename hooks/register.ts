@@ -46,32 +46,69 @@ export const format = (s: CacheStats, now: number): string | undefined => {
   return `${dot} cache ● ${s.ttl} ${bar} ${time}${hit} · misses ${s.misses} (est.)`
 }
 
+// Seconds before expiry to draft the handoff: 5m for the 1h window, 1m for the 5m window.
+const WARN_SECONDS: Record<string, number> = { '5m': 60, '1h': 300 }
+
+export const HANDOFF_ASK =
+  'The prompt cache is about to expire. Write a handoff for a fresh session as ONE paste-ready prompt ' +
+  'in a fenced block: goal, what is done, files touched, open decisions, and the exact next step.'
+
+// True once per cache window, when it enters the last WARN_SECONDS.
+export const shouldWarn = (s: CacheStats, now: number, warnedFor: number | null): boolean => {
+  if (s.lastAt === null || warnedFor === s.lastAt) return false
+  const left = (s.lastAt + (TTL_SECONDS[s.ttl] ?? 3600) * 1000 - now) / 1000
+  return left > 0 && left <= (WARN_SECONDS[s.ttl] ?? 300)
+}
+
+const draftHandoff = async ($: EngineInterface) => {
+  const { text } = await $.prompt.read()
+  if (text.includes(HANDOFF_ASK)) return
+  await $.prompt.fill({ text: text ? `\n${HANDOFF_ASK}` : HANDOFF_ASK, mode: 'append' })
+}
+
 // The terminal has the accurate statusLine script (~/.claude/statusline.sh); show this only in the app.
 const show = async ($: EngineInterface, stats: CacheStats) => {
   const inApp = (await $.session.surfaces()).some((s: string) => s !== 'terminal')
   $.ui.status(inApp ? format(stats, await $.clock.now()) : undefined)
 }
 
+type Live = { stats: CacheStats; warnedFor: number | null }
+
+const tick = async ($: EngineInterface, live: Live) => {
+  await show($, live.stats)
+  if (shouldWarn(live.stats, await $.clock.now(), live.warnedFor)) {
+    live.warnedFor = live.stats.lastAt
+    $.ui.toast('Cache closes soon — handoff prompt drafted in your input box')
+    await draftHandoff($)
+  }
+}
+
 export const register: Register = on => {
-  let stats = emptyStats('1h')
+  const live: Live = { stats: emptyStats('1h'), warnedFor: null }
   let ticking = false
 
   on('session.start', async ($, e, next) => {
     const env = await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')
     const forced5m = await $.env.get('FORCE_PROMPT_CACHING_5M')
-    stats = emptyStats(forced5m === '1' ? '5m' : env === '5m' || env === '1h' ? env : '1h')
+    live.stats = emptyStats(forced5m === '1' ? '5m' : env === '5m' || env === '1h' ? env : '1h')
     if (!ticking) {
       ticking = true
-      $.clock.every(30_000, () => show($, stats))
+      $.clock.every(30_000, () => tick($, live))
     }
+    await $.command.register({ name: 'handoff', description: 'Draft a handoff prompt for a fresh session' })
     return next(e)
+  })
+
+  on('command.run', { command: 'handoff' }, async ($, e, next) => {
+    await draftHandoff($)
+    return { text: 'Handoff prompt drafted in your input box — press Enter to send.' }
   })
 
   on('turn.step', async function* ($, e, next) {
     const r = yield* next(e)
     if (e.agentId === undefined && r.usage) {
-      stats = record(stats, r.usage, await $.clock.now())
-      await show($, stats)
+      live.stats = record(live.stats, r.usage, await $.clock.now())
+      await show($, live.stats)
     }
     return r
   })
