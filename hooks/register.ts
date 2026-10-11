@@ -46,7 +46,7 @@ export const format = (s: CacheStats, now: number): string | undefined => {
   return `${dot} cache ● ${s.ttl} ${bar} ${time}${hit} · misses ${s.misses} (est.)`
 }
 
-// Seconds before expiry to draft the handoff: 5m for the 1h window, 1m for the 5m window.
+// Seconds before expiry to auto-compact: 5m for the 1h window, 1m for the 5m window.
 const WARN_SECONDS: Record<string, number> = { '5m': 60, '1h': 300 }
 
 export const HANDOFF_ASK =
@@ -74,13 +74,23 @@ const show = async ($: EngineInterface, stats: CacheStats) => {
 
 type Live = { stats: CacheStats; warnedFor: number | null }
 
+export const COMPACT_INSTRUCTIONS =
+  'Keep: goal, what is done, files touched, open decisions, and the exact next step.'
+
+// Compacts while the cache is warm, so the summary reads the context at cache-hit price.
+const autoCompact = async ($: EngineInterface, live: Live) => {
+  live.warnedFor = live.stats.lastAt
+  try {
+    const r = await $.session.compact({ instructions: COMPACT_INSTRUCTIONS })
+    $.ui.toast(r.skip ? `Auto-compact skipped: ${r.skip}` : 'Cache closing — session compacted while warm')
+  } catch {
+    live.warnedFor = null // a turn is running; retry on the next tick
+  }
+}
+
 const tick = async ($: EngineInterface, live: Live) => {
   await show($, live.stats)
-  if (shouldWarn(live.stats, await $.clock.now(), live.warnedFor)) {
-    live.warnedFor = live.stats.lastAt
-    $.ui.toast('Cache closes soon — handoff prompt drafted in your input box')
-    await draftHandoff($)
-  }
+  if (shouldWarn(live.stats, await $.clock.now(), live.warnedFor)) await autoCompact($, live)
 }
 
 export const register: Register = on => {

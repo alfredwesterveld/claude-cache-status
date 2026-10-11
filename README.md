@@ -18,12 +18,16 @@ desktop app's status area.
 All values are **estimates** from main-thread response usage; the mod API exposes no
 `prompt_cache` object. Subagent turns are ignored.
 
-## Handoff prompt
+## Auto-compact before expiry
 
-When the window nears expiry (last 5m of `1h`, last 1m of `5m`) the mod toasts once and
-appends a handoff request to your input box. Nothing is sent: press Enter to have Claude
-write a paste-ready prompt for a fresh session while the cache is still warm.
-Run `/handoff` to draft it any time.
+When the window nears expiry (last 5m of `1h`, last 1m of `5m`) the mod compacts the
+session itself via `$.session.compact()` — the same call `/compact` makes — keeping goal,
+progress, files touched, open decisions and the next step. Compacting while the cache is
+warm reads the context at cache-hit price, so it costs far less than after expiry.
+Runs once per cache window; if a turn is running, it retries on the next 30s tick.
+
+Want a fresh session instead? Run `/handoff` to draft a paste-ready handoff prompt in your
+input box.
 
 ## TTL detection
 
